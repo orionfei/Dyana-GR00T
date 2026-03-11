@@ -68,14 +68,14 @@ policy.metadata = dataset.metadata
 
 step_data = dataset[0]
 
-print(step_data)
+# print(step_data)
 
 print("\n\n ====================================")
-for key, value in step_data.items():
-    if isinstance(value, np.ndarray):
-        print(key, value.shape)
-    else:
-        print(key, value)
+# for key, value in step_data.items():
+#     if isinstance(value, np.ndarray):
+#         print(key, value.shape)
+#     else:
+#         print(key, value)
 
 # Run the policy
 predicted_action = policy.get_action(step_data)
