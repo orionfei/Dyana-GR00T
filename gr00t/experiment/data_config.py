@@ -273,6 +273,22 @@ class So100DualCamDataConfig(So100DataConfig):
 
 ###########################################################################################
 
+class DyanaLoRA11F18DDataConfig(So100DataConfig):
+    """
+    Dyana custom config for LoRA fine-tuning:
+    - 11-frame observation window (t-10 ... t)
+    - 1-step action target
+    - 18-dim action/state from left_hand key
+    """
+
+    video_keys = ["video.ego_view"]
+    state_keys = ["state.left_hand"]
+    action_keys = ["action.left_hand"]
+    language_keys = ["annotation.human.action.task_description"]
+    observation_indices = list(range(-10, 1))
+    action_indices = [0]
+
+############################################################################################
 
 class UnitreeG1DataConfig(BaseDataConfig):
     video_keys = ["video.rs_view"]
@@ -769,6 +785,12 @@ class AgibotGenie1DataConfig(BaseDataConfig):
 
         return ComposedModalityTransform(transforms=transforms)
 
+class DyanaLeftHandConfig(So100DataConfig):
+    video_keys = ["video.ego_view"]
+    state_keys = ["state.left_hand"]
+    action_keys = ["action.left_hand"]
+    language_keys = ["annotation.human.action.task_description"]
+
 
 ###########################################################################################
 
@@ -781,6 +803,7 @@ DATA_CONFIG_MAP = {
     "single_panda_gripper": SinglePandaGripperDataConfig(),
     "so100": So100DataConfig(),
     "so100_dualcam": So100DualCamDataConfig(),
+    "dyana_lora_11f_18d": DyanaLoRA11F18DDataConfig(),
     "unitree_g1": UnitreeG1DataConfig(),
     "unitree_g1_full_body": UnitreeG1FullBodyDataConfig(),
     "oxe_droid": OxeDroidDataConfig(),
