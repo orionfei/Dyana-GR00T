@@ -60,14 +60,24 @@ dataset = LeRobotSingleDataset(
     embodiment_tag=EMBODIMENT_TAG,
 )
 
+# Read one raw sample first, then align metadata with the true video resolution.
+step_data = dataset[0]
+for video_key in modality_config["video"].modality_keys:
+    if video_key not in step_data:
+        continue
+    # step_data[video_key] shape: [T, H, W, C]
+    frames = step_data[video_key]
+    height, width = int(frames.shape[-3]), int(frames.shape[-2])
+    sub_key = video_key.split(".", 1)[1]
+    if sub_key in dataset.metadata.modalities.video:
+        dataset.metadata.modalities.video[sub_key].resolution = (width, height)
+        print(f"Updated metadata resolution for {video_key}: {(width, height)}")
+
 # Align normalization/statistics and modality dimensions with the current dataset.
-# This is useful for running baseline inference on custom data before finetuning.
 policy.modality_transform.set_metadata(dataset.metadata)
 policy.metadata = dataset.metadata
 
 # Visualize one example data
-
-step_data = dataset[0]
 
 print(step_data)
 
