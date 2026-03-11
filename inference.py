@@ -11,7 +11,8 @@ MODEL_PATH = "nvidia/GR00T-N1.5-3B"
 # REPO_PATH is the path of the pip install gr00t repo and one level up
 REPO_PATH = os.path.dirname(os.path.dirname(gr00t.__file__))
 DATASET_PATH = os.path.join(REPO_PATH, "dyana_data")
-EMBODIMENT_TAG = "gr1"
+# Must match the embodiment_tag used during fine-tuning.
+EMBODIMENT_TAG = "new_embodiment"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
