@@ -70,56 +70,6 @@ for key, value in step_data.items():
     else:
         print(key, value)
 
-# import matplotlib.pyplot as plt
-
-# traj_id = 0
-# max_steps = 150
-
-# state_joints_across_time = []
-# gt_action_joints_across_time = []
-# images = []
-
-# sample_images = 6
-
-# for step_count in range(max_steps):
-#     data_point = dataset.get_step_data(traj_id, step_count)
-#     state_joints = data_point["state.right_arm"][0]
-#     gt_action_joints = data_point["action.right_arm"][0]
-    
-   
-#     state_joints_across_time.append(state_joints)
-#     gt_action_joints_across_time.append(gt_action_joints)
-
-#     # We can also get the image data
-#     if step_count % (max_steps // sample_images) == 0:
-#         image = data_point["video.ego_view"][0]
-#         images.append(image)
-
-# # Size is (max_steps, num_joints == 7)
-# state_joints_across_time = np.array(state_joints_across_time)
-# gt_action_joints_across_time = np.array(gt_action_joints_across_time)
-
-
-# # Plot the joint angles across time
-# fig, axes = plt.subplots(nrows=7, ncols=1, figsize=(8, 2*7))
-
-# for i, ax in enumerate(axes):
-#     ax.plot(state_joints_across_time[:, i], label="state joints")
-#     ax.plot(gt_action_joints_across_time[:, i], label="gt action joints")
-#     ax.set_title(f"Joint {i}")
-#     ax.legend()
-
-# plt.tight_layout()
-# plt.show()
-
-
-# # Plot the images in a row
-# fig, axes = plt.subplots(nrows=1, ncols=sample_images, figsize=(16, 4))
-
-# for i, ax in enumerate(axes):
-#     ax.imshow(images[i])
-#     ax.axis("off")
-
 # Run the policy
 predicted_action = policy.get_action(step_data)
 for key, value in predicted_action.items():
