@@ -11,8 +11,10 @@ MODEL_PATH = "nvidia/GR00T-N1.5-3B"
 # REPO_PATH is the path of the pip install gr00t repo and one level up
 REPO_PATH = os.path.dirname(os.path.dirname(gr00t.__file__))
 DATASET_PATH = os.path.join(REPO_PATH, "dyana_data")
-# Must match the embodiment_tag used during fine-tuning.
-EMBODIMENT_TAG = "new_embodiment"
+# For pre-finetune baseline inference with the base model, use a built-in tag.
+# After finetuning, switch this to the tag used in training (e.g. "new_embodiment")
+# and point MODEL_PATH to your finetuned checkpoint directory.
+EMBODIMENT_TAG = "gr1"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -57,6 +59,11 @@ dataset = LeRobotSingleDataset(
     transforms=None,  # We'll handle transforms separately through the policy
     embodiment_tag=EMBODIMENT_TAG,
 )
+
+# Align normalization/statistics and modality dimensions with the current dataset.
+# This is useful for running baseline inference on custom data before finetuning.
+policy.modality_transform.set_metadata(dataset.metadata)
+policy.metadata = dataset.metadata
 
 # Visualize one example data
 
