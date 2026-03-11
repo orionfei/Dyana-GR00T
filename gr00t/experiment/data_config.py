@@ -277,7 +277,7 @@ class DyanaLoRA11F18DDataConfig(So100DataConfig):
     """
     Dyana custom config for LoRA fine-tuning:
     - 11-frame observation window (t-10 ... t)
-    - 1-step action target
+    - 10-step action target
     - 18-dim action/state from left_hand key
     """
 
@@ -286,7 +286,7 @@ class DyanaLoRA11F18DDataConfig(So100DataConfig):
     action_keys = ["action.left_hand"]
     language_keys = ["annotation.human.action.task_description"]
     observation_indices = list(range(-10, 1))
-    action_indices = [0]
+    action_indices = list(range(10))
 
 ############################################################################################
 
