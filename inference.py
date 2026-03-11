@@ -18,7 +18,6 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # Load Pretrained Model
 from gr00t.experiment.data_config import DATA_CONFIG_MAP
 
-
 data_config = DATA_CONFIG_MAP["dyana_lora_11f_18d"]
 modality_config = data_config.modality_config()
 modality_transform = data_config.transform()
