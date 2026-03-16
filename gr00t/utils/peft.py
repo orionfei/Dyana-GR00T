@@ -14,7 +14,31 @@ def _wrap_forward(model):
     return model
 
 
-def get_lora_model(model, rank=32, lora_alpha=16, lora_dropout=0.1, action_head_only=True):
+def _get_modules_to_save(action_head_only: bool, tune_projector: bool) -> list[str] | None:
+    if not tune_projector:
+        return None
+
+    prefix = "action_head."
+    modules_to_save = [
+        f"{prefix}state_encoder",
+        f"{prefix}action_encoder",
+        f"{prefix}action_decoder",
+    ]
+
+    # PEFT expects module names from the top-level model namespace.
+    # The action head is always rooted at `action_head`, regardless of whether
+    # LoRA targets only the action head or the full model.
+    return modules_to_save
+
+
+def get_lora_model(
+    model,
+    rank=32,
+    lora_alpha=16,
+    lora_dropout=0.1,
+    action_head_only=True,
+    tune_projector=True,
+):
     target_modules = []
 
     # Inspect model structure to find the correct paths
@@ -27,6 +51,14 @@ def get_lora_model(model, rank=32, lora_alpha=16, lora_dropout=0.1, action_head_
             if any(x in name for x in ["q_proj", "v_proj", "to_q", "to_v", "k_proj", "to_k"]):
                 target_modules.append(name)
 
+    modules_to_save = _get_modules_to_save(
+        action_head_only=action_head_only, tune_projector=tune_projector
+    )
+
+    print(f"LoRA target modules: {len(target_modules)} matched")
+    if modules_to_save is not None:
+        print(f"LoRA modules_to_save: {modules_to_save}")
+
     lora_config = LoraConfig(
         r=rank,
         lora_alpha=lora_alpha,
@@ -34,6 +66,7 @@ def get_lora_model(model, rank=32, lora_alpha=16, lora_dropout=0.1, action_head_
         lora_dropout=lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
+        modules_to_save=modules_to_save,
     )
 
     model = get_peft_model(model, lora_config)

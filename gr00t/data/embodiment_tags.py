@@ -37,9 +37,15 @@ class EmbodimentTag(Enum):
     Any new embodiment for finetuning.
     """
 
+    DYANA_HAND_TASK = "dyana_hand_task"
+    """
+    Dedicated embodiment for the Dyana 18D hand task.
+    """
+
 
 # Embodiment tag string: to projector index in the Action Expert Module
 EMBODIMENT_TAG_MAPPING = {
+    EmbodimentTag.DYANA_HAND_TASK.value: 30,
     EmbodimentTag.NEW_EMBODIMENT.value: 31,
     EmbodimentTag.OXE_DROID.value: 17,
     EmbodimentTag.AGIBOT_GENIE1.value: 26,

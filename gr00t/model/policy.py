@@ -237,7 +237,27 @@ class Gr00tPolicy(BasePolicy):
         return True
 
     def _load_model(self, model_path):
-        model = GR00T_N1_5.from_pretrained(model_path, torch_dtype=COMPUTE_DTYPE)
+        adapter_config_path = Path(model_path) / "adapter_config.json"
+        if adapter_config_path.exists():
+            with open(adapter_config_path, "r") as f:
+                adapter_config = json.load(f)
+            base_model_path = adapter_config["base_model_name_or_path"]
+            print(f"Loading base model for adapter checkpoint from: {base_model_path}")
+            model = GR00T_N1_5.from_pretrained(base_model_path, torch_dtype=COMPUTE_DTYPE)
+            try:
+                from peft import PeftModel
+            except ImportError as e:
+                raise ImportError(
+                    "peft is required to load adapter checkpoints during inference/eval"
+                ) from e
+            model = PeftModel.from_pretrained(model, str(model_path))
+            modules_to_save = adapter_config.get("modules_to_save")
+            if modules_to_save:
+                print(f"Keeping adapter unmerged because modules_to_save are present: {modules_to_save}")
+            elif hasattr(model, "merge_and_unload"):
+                model = model.merge_and_unload()
+        else:
+            model = GR00T_N1_5.from_pretrained(model_path, torch_dtype=COMPUTE_DTYPE)
         model.eval()  # Set model to eval mode
 
         # Update action_horizon to match modality config

@@ -1,22 +1,34 @@
 import os
+from pathlib import Path
+
 import torch
-import gr00t
 
 from gr00t.data.dataset import LeRobotSingleDataset
+from gr00t.data.transform.video import VideoCrop
 from gr00t.model.policy import Gr00tPolicy
 
 # change the following paths
-MODEL_PATH = "nvidia/GR00T-N1.5-3B"
-
-# REPO_PATH is the path of the pip install gr00t repo and one level up
-REPO_PATH = os.path.dirname(os.path.dirname(gr00t.__file__))
+REPO_PATH = os.path.dirname(os.path.abspath(__file__))
 DATASET_PATH = os.path.join(REPO_PATH, "dyana_data")
-# For pre-finetune baseline inference with the base model, use a built-in tag.
-# After finetuning, switch this to the tag used in training (e.g. "new_embodiment")
-# and point MODEL_PATH to your finetuned checkpoint directory.
-EMBODIMENT_TAG = "gr1"
+DEFAULT_MODEL_ROOT = Path(REPO_PATH) / "checkpoints" / "dyana_hand_task_lora"
+# This must match the embodiment tag used during finetuning.
+EMBODIMENT_TAG = "dyana_hand_task"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def resolve_model_path() -> str:
+    env_model_path = os.environ.get("DYANA_GR00T_MODEL_PATH")
+    if env_model_path:
+        return env_model_path
+
+    checkpoint_dirs = sorted(DEFAULT_MODEL_ROOT.glob("checkpoint-*"))
+    if checkpoint_dirs:
+        return str(checkpoint_dirs[-1])
+    return str(DEFAULT_MODEL_ROOT)
+
+
+MODEL_PATH = resolve_model_path()
 
 # Load Pretrained Model
 from gr00t.experiment.data_config import DATA_CONFIG_MAP
@@ -59,14 +71,32 @@ dataset = LeRobotSingleDataset(
     embodiment_tag=EMBODIMENT_TAG,
 )
 
+# Read one raw sample first, then align metadata with the true video resolution.
+step_data = dataset[0]
+for video_key in modality_config["video"].modality_keys:
+    if video_key not in step_data:
+        continue
+    # step_data[video_key] shape: [T, H, W, C]
+    frames = step_data[video_key]
+    height, width = int(frames.shape[-3]), int(frames.shape[-2])
+    sub_key = video_key.split(".", 1)[1]
+    if sub_key in dataset.metadata.modalities.video:
+        dataset.metadata.modalities.video[sub_key].resolution = (width, height)
+        print(f"Updated metadata resolution for {video_key}: {(width, height)}")
+
 # Align normalization/statistics and modality dimensions with the current dataset.
-# This is useful for running baseline inference on custom data before finetuning.
+# `Gr00tPolicy` first loads checkpoint metadata. If that metadata has a different
+# camera resolution, VideoCrop may keep stale (height, width). Reset it so current
+# dataset metadata is always used.
+for transform in policy.modality_transform.transforms:
+    if isinstance(transform, VideoCrop):
+        transform.height = None
+        transform.width = None
+
 policy.modality_transform.set_metadata(dataset.metadata)
 policy.metadata = dataset.metadata
 
 # Visualize one example data
-
-step_data = dataset[0]
 
 # print(step_data)
 
@@ -79,6 +109,16 @@ print("\n\n ====================================")
 
 # Run the policy
 predicted_action = policy.get_action(step_data)
+
+target_action_key = modality_config["action"].modality_keys[0]
+assert target_action_key in predicted_action, (
+    f"Expected action key {target_action_key}, got {list(predicted_action.keys())}"
+)
+target_action = predicted_action[target_action_key]
+assert target_action.shape[-1] == 18, (
+    f"Expected 18-dim action for {target_action_key}, got shape {target_action.shape}"
+)
+
 for key, value in predicted_action.items():
     print(key, value.shape)
     

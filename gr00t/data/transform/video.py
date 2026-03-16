@@ -247,6 +247,11 @@ class VideoCrop(VideoTransform):
         ...,
         description="The scale of the crop. The crop size is (width * scale, height * scale)",
     )
+    _use_metadata_resolution: bool = PrivateAttr(default=True)
+
+    def model_post_init(self, __context: Any) -> None:
+        # If height/width are not explicitly provided, always infer from dataset metadata.
+        self._use_metadata_resolution = self.height is None and self.width is None
 
     def get_transform(self, mode: Literal["train", "eval"] = "train") -> Callable:
         """Get the transform for the given mode.
@@ -261,12 +266,11 @@ class VideoCrop(VideoTransform):
         assert (
             len(set(self.original_resolutions.values())) == 1
         ), f"All video keys must have the same resolution, got: {self.original_resolutions}"
-        if self.height is None:
-            assert self.width is None, "Height and width must be either both provided or both None"
+        if self._use_metadata_resolution:
             self.width, self.height = self.original_resolutions[self.apply_to[0]]
         else:
             assert (
-                self.width is not None
+                self.height is not None and self.width is not None
             ), "Height and width must be either both provided or both None"
         # 2. Create the transform
         size = (int(self.height * self.scale), int(self.width * self.scale))

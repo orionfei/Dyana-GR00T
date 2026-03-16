@@ -288,6 +288,15 @@ class DyanaLoRA11F18DDataConfig(So100DataConfig):
     observation_indices = list(range(-10, 1))
     action_indices = list(range(10))
 
+    def transform(self) -> ModalityTransform:
+        transforms = super().transform()
+        # Enforce native 18D action head for Dyana task (no 32D padding baseline during training).
+        assert len(transforms.transforms) > 0, "No transforms found in data config"
+        last_transform = transforms.transforms[-1]
+        assert isinstance(last_transform, GR00TTransform), "Last transform must be GR00TTransform"
+        last_transform.max_action_dim = 18
+        return transforms
+
 ############################################################################################
 
 class UnitreeG1DataConfig(BaseDataConfig):
