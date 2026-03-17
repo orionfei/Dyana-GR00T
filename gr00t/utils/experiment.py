@@ -20,18 +20,46 @@ import torch
 from transformers import Trainer, TrainerCallback
 
 
-def safe_save_model_for_hf_trainer(trainer: Trainer, output_dir: str):
+def assert_adapter_checkpoint_artifacts(output_dir: str | Path) -> None:
+    output_dir = Path(output_dir)
+    adapter_config = output_dir / "adapter_config.json"
+    adapter_weight_candidates = [
+        output_dir / "adapter_model.bin",
+        output_dir / "adapter_model.safetensors",
+    ]
+    if not adapter_config.exists():
+        raise FileNotFoundError(f"Missing LoRA adapter config in checkpoint: {adapter_config}")
+    if not any(path.exists() for path in adapter_weight_candidates):
+        raise FileNotFoundError(
+            "Missing LoRA adapter weights in checkpoint. Expected one of: "
+            + ", ".join(str(path) for path in adapter_weight_candidates)
+        )
+
+
+def safe_save_model_for_hf_trainer(
+    trainer: Trainer,
+    output_dir: str,
+    assert_adapter_checkpoint: bool = False,
+):
     """Collects the state dict and dump to disk."""
     if trainer.deepspeed:
         torch.cuda.synchronize()
         trainer.save_model(output_dir, _internal_call=True)
+        if assert_adapter_checkpoint and trainer.args.should_save:
+            assert_adapter_checkpoint_artifacts(output_dir)
         return
 
     state_dict = trainer.model.state_dict()
     if trainer.args.should_save:
         cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
         del state_dict
-        trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
+        if assert_adapter_checkpoint:
+            trainer.model.save_pretrained(output_dir, state_dict=cpu_state_dict)
+            torch.save(trainer.args, Path(output_dir) / "training_args.bin")
+        else:
+            trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
+    if assert_adapter_checkpoint and trainer.args.should_save:
+        assert_adapter_checkpoint_artifacts(output_dir)
 
 
 class CheckpointFormatCallback(TrainerCallback):
@@ -42,13 +70,19 @@ class CheckpointFormatCallback(TrainerCallback):
     - metadata.json
     """
 
-    def __init__(self, run_name: str, exp_cfg_dir: Path | None = None):
+    def __init__(
+        self,
+        run_name: str,
+        exp_cfg_dir: Path | None = None,
+        assert_adapter_checkpoint: bool = False,
+    ):
         """
         Args:
             run_name: Name of the experiment run
             exp_cfg_dir: Path to the directory containing all experiment metadata
         """
         self.exp_cfg_dir = exp_cfg_dir
+        self.assert_adapter_checkpoint = assert_adapter_checkpoint
 
     def on_save(self, args, state, control, **kwargs):
         """Called after the trainer saves a checkpoint."""
@@ -60,3 +94,5 @@ class CheckpointFormatCallback(TrainerCallback):
                 exp_cfg_dst = checkpoint_dir / self.exp_cfg_dir.name
                 if self.exp_cfg_dir.exists():
                     shutil.copytree(self.exp_cfg_dir, exp_cfg_dst, dirs_exist_ok=True)
+            if self.assert_adapter_checkpoint:
+                assert_adapter_checkpoint_artifacts(checkpoint_dir)

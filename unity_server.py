@@ -15,6 +15,7 @@ class UnityServer:
         self._recv_task = None
         self._obs_queue = asyncio.Queue()
         self._metrics_queue = asyncio.Queue()
+        self._step_feedback_queue = asyncio.Queue()
         self._connection_event = asyncio.Event()  # 用于等待连接建立
         self.server = None
         self.resize_size = resize_size
@@ -91,6 +92,27 @@ class UnityServer:
                 }
                 self._metrics_queue.put_nowait(metrics)
                 print(f"📉 收到 episode: {data['episode_id']}, repeat: {data['repeat']} 的 metrics（{data['score']}, {data['success']}），已经放入队列")
+
+            elif msg["type"] == "step_feedback":
+                data = json.loads(msg["data"])
+                feedback = {
+                    "episode_id": data["episode_id"],
+                    "repeat": data["repeat"],
+                    "decision_step": data["decision_step"],
+                    "done": data["done"],
+                    "success": data["success"],
+                    "task_type": data["task_type"],
+                    "current_frame_index": data["current_frame_index"],
+                    "successIndex": data["successIndex"],
+                    "min_distance_to_target": data["min_distance_to_target"],
+                    "minJointToSurfaceDistance": data["minJointToSurfaceDistance"],
+                }
+                self._step_feedback_queue.put_nowait(feedback)
+                print(
+                    "🧭 收到 episode: "
+                    f"{data['episode_id']}, repeat: {data['repeat']} 的 step_feedback "
+                    f"(step={data['decision_step']}, done={data['done']}, success={data['success']})"
+                )
 
             else:
                 print("⚠️ 收到未知消息类型:", msg["type"])
@@ -178,6 +200,23 @@ class UnityServer:
             if self._metrics_queue.empty():
                 return None
             return self._metrics_queue.get_nowait()
+
+    def get_step_feedback(self, block=True, timeout=None):
+        """获取 Unity 发送的 chunk 级 step feedback。"""
+        loop = asyncio.get_event_loop()
+        if block:
+            try:
+                return loop.run_until_complete(asyncio.wait_for(self._step_feedback_queue.get(), timeout))
+            except asyncio.TimeoutError:
+                return None
+        else:
+            if self._step_feedback_queue.empty():
+                return None
+            return self._step_feedback_queue.get_nowait()
+
+    def get_step_feedback_sync(self, block=True, timeout=None):
+        """同步版本的 get_step_feedback。"""
+        return self.get_step_feedback(block=block, timeout=timeout)
 
     async def send_start_episode(self, episode_id, task_type, repeat_num, steps, start_frame_idx, windowSize):
         """通知 Unity 开始一个 episode"""
@@ -275,6 +314,8 @@ class UnityServer:
 
     async def stop(self):
         """关闭服务"""
+        if self.server is None:
+            return
         self.server.close()
         await self.server.wait_closed()
         print("🛑 Python WebSocket 服务已关闭")

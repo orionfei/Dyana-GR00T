@@ -24,7 +24,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Literal
+from typing import Any, List, Literal
 
 import torch
 import tyro
@@ -32,6 +32,11 @@ from transformers import TrainingArguments
 
 from gr00t.data.dataset import LeRobotMixtureDataset, LeRobotSingleDataset
 from gr00t.data.schema import EmbodimentTag
+from gr00t.data.dyana_subset import (
+    FilteredStepDataset,
+    build_dyana_sampling_artifacts,
+    persist_dyana_sampling_artifacts,
+)
 from gr00t.data.transform.concat import ConcatTransform
 from gr00t.data.transform.dyana import (
     DyanaMotionTokenTransform,
@@ -54,6 +59,27 @@ DYANA_PHASE1_CONFIG_SPECS = {
     "dyana_target_crop_token_11f_18d": {"video_views": 2, "motion_view": False, "target_crop": True, "token": True},
     "dyana_motion_crop_11f_18d": {"video_views": 3, "motion_view": True, "target_crop": True, "token": False},
     "dyana_motion_crop_token_11f_18d": {"video_views": 3, "motion_view": True, "target_crop": True, "token": True},
+}
+
+DYANA_STAGE_PRESETS = {
+    "pilot": {
+        "train_episodes_per_task": 8000,
+        "holdout_episodes_per_task": 100,
+        "base_index_stride": 2,
+        "max_steps": 2000,
+        "learning_rate": 1e-4,
+        "warmup_ratio": 0.03,
+        "target_effective_batch": 16,
+    },
+    "main": {
+        "train_episodes_per_task": 20000,
+        "holdout_episodes_per_task": 100,
+        "base_index_stride": 2,
+        "max_steps": 5000,
+        "learning_rate": 1e-4,
+        "warmup_ratio": 0.03,
+        "target_effective_batch": 16,
+    },
 }
 
 
@@ -347,6 +373,45 @@ class ArgsConfig:
     strict_preflight: bool = True
     """If True, run fail-fast checks on dataset keys/shapes/horizons/dimensions before training."""
 
+    dyana_optimized: bool = False
+    """Enable the opt-in Dyana subset/holdout optimization path."""
+
+    dyana_stage: Literal["pilot", "main", "custom"] = "pilot"
+    """Dyana optimization preset. Use 'custom' to fully control subset and schedule values."""
+
+    dyana_subset_seed: int = 42
+    """Random seed for Dyana stratified subset sampling."""
+
+    dyana_train_episodes_per_task: int | None = None
+    """Episodes per task family for the Dyana train subset. Defaults come from dyana_stage."""
+
+    dyana_holdout_episodes_per_task: int | None = None
+    """Episodes per task family for the Dyana holdout subset. Defaults come from dyana_stage."""
+
+    dyana_base_index_stride: int | None = None
+    """Keep one training window every N base indices in Dyana optimized mode."""
+
+    dyana_task_repeat_linear: int = 2
+    """Repeat factor for linear episodes in the Dyana train manifest."""
+
+    dyana_task_repeat_circular: int = 1
+    """Repeat factor for circular episodes in the Dyana train manifest."""
+
+    dyana_task_repeat_harmonic: int = 1
+    """Repeat factor for harmonic episodes in the Dyana train manifest."""
+
+    dyana_eval_steps: int = 500
+    """Evaluation frequency for Dyana optimized mode."""
+
+    dyana_early_stop_patience: int = 3
+    """Early stopping patience in evaluation intervals for Dyana optimized mode."""
+
+    assert_lora_targets: bool = False
+    """Fail if LoRA target modules or LoRA trainable parameters are missing."""
+
+    assert_adapter_checkpoint: bool = False
+    """Fail if adapter artifacts are missing from saved checkpoints."""
+
 
 #####################################################################################
 # Helper functions
@@ -406,6 +471,114 @@ def _copy_partial_action_expert_weights(old_dict, new_dict, old_dim, new_dim):
     return new_dict
 
 
+def _is_dyana_optimized_enabled(config: ArgsConfig) -> bool:
+    if not config.dyana_optimized:
+        return False
+    if config.data_config not in DYANA_PHASE1_CONFIG_SPECS:
+        print(
+            f"dyana_optimized=True ignored for non-Dyana data config '{config.data_config}'."
+        )
+        return False
+    if len(config.dataset_path) != 1:
+        raise ValueError("dyana_optimized mode only supports a single Dyana dataset path.")
+    return True
+
+
+def _resolve_dyana_optimization_settings(config: ArgsConfig) -> dict[str, Any]:
+    if config.dyana_stage == "custom":
+        if config.dyana_train_episodes_per_task is None:
+            raise ValueError("dyana_stage=custom requires --dyana-train-episodes-per-task")
+        if config.dyana_holdout_episodes_per_task is None:
+            raise ValueError("dyana_stage=custom requires --dyana-holdout-episodes-per-task")
+        if config.dyana_base_index_stride is None:
+            raise ValueError("dyana_stage=custom requires --dyana-base-index-stride")
+        preset = None
+    else:
+        preset = DYANA_STAGE_PRESETS[config.dyana_stage]
+
+    train_episodes_per_task = (
+        config.dyana_train_episodes_per_task
+        if config.dyana_train_episodes_per_task is not None
+        else preset["train_episodes_per_task"]
+    )
+    holdout_episodes_per_task = (
+        config.dyana_holdout_episodes_per_task
+        if config.dyana_holdout_episodes_per_task is not None
+        else preset["holdout_episodes_per_task"]
+    )
+    base_index_stride = (
+        config.dyana_base_index_stride
+        if config.dyana_base_index_stride is not None
+        else preset["base_index_stride"]
+    )
+
+    effective_max_steps = config.max_steps
+    effective_learning_rate = config.learning_rate
+    effective_warmup_ratio = config.warmup_ratio
+    effective_gradient_accumulation_steps = config.gradient_accumulation_steps
+
+    if preset is not None:
+        if config.max_steps == ArgsConfig.max_steps:
+            effective_max_steps = preset["max_steps"]
+        if config.learning_rate == ArgsConfig.learning_rate:
+            effective_learning_rate = preset["learning_rate"]
+        if config.warmup_ratio == ArgsConfig.warmup_ratio:
+            effective_warmup_ratio = preset["warmup_ratio"]
+        if config.gradient_accumulation_steps == ArgsConfig.gradient_accumulation_steps:
+            effective_gradient_accumulation_steps = max(
+                1,
+                math.ceil(
+                    preset["target_effective_batch"]
+                    / max(1, config.num_gpus * config.batch_size)
+                ),
+            )
+
+    task_repeat_factors = {
+        "linear": int(config.dyana_task_repeat_linear),
+        "circular": int(config.dyana_task_repeat_circular),
+        "harmonic": int(config.dyana_task_repeat_harmonic),
+    }
+    eval_steps = max(1, int(config.dyana_eval_steps))
+    save_steps = max(1, int(config.save_steps))
+    if save_steps % eval_steps != 0:
+        adjusted_save_steps = int(math.ceil(save_steps / eval_steps) * eval_steps)
+        print(
+            f"Adjusting save_steps for Dyana optimized eval alignment: {save_steps} -> {adjusted_save_steps}"
+        )
+        save_steps = adjusted_save_steps
+
+    return {
+        "stage": config.dyana_stage,
+        "train_episodes_per_task": int(train_episodes_per_task),
+        "holdout_episodes_per_task": int(holdout_episodes_per_task),
+        "base_index_stride": int(base_index_stride),
+        "task_repeat_factors": task_repeat_factors,
+        "max_steps": int(effective_max_steps),
+        "learning_rate": float(effective_learning_rate),
+        "warmup_ratio": float(effective_warmup_ratio),
+        "gradient_accumulation_steps": int(effective_gradient_accumulation_steps),
+        "eval_steps": eval_steps,
+        "save_steps": save_steps,
+        "early_stop_patience": int(config.dyana_early_stop_patience),
+    }
+
+
+def _log_dyana_optimization_settings(settings: dict[str, Any]) -> None:
+    print(
+        "Dyana optimized mode | "
+        f"stage={settings['stage']} "
+        f"train_eps_per_task={settings['train_episodes_per_task']} "
+        f"holdout_eps_per_task={settings['holdout_episodes_per_task']} "
+        f"stride={settings['base_index_stride']} "
+        f"grad_acc={settings['gradient_accumulation_steps']} "
+        f"max_steps={settings['max_steps']} "
+        f"lr={settings['learning_rate']} "
+        f"warmup_ratio={settings['warmup_ratio']} "
+        f"eval_steps={settings['eval_steps']} "
+        f"save_steps={settings['save_steps']}"
+    )
+
+
 #####################################################################################
 # main training function
 #####################################################################################
@@ -415,31 +588,78 @@ def main(config: ArgsConfig):
     """Main training function."""
     # ------------ step 1: load dataset ------------
     embodiment_tag = EmbodimentTag(config.embodiment_tag)
+    dyana_optimized_enabled = _is_dyana_optimized_enabled(config)
+    dyana_settings = _resolve_dyana_optimization_settings(config) if dyana_optimized_enabled else None
+    if dyana_settings is not None:
+        _log_dyana_optimization_settings(dyana_settings)
 
     # 1.1 modality configs and transforms
     data_config_cls = load_data_config(config.data_config)
     modality_configs = data_config_cls.modality_config()
     transforms = data_config_cls.transform()
+    train_dataset = None
+    eval_dataset = None
 
     # 1.2 data loader: we will use either single dataset or mixture dataset
     if len(config.dataset_path) == 1:
-        train_dataset = LeRobotSingleDataset(
+        base_dataset = LeRobotSingleDataset(
             dataset_path=config.dataset_path[0],
             modality_configs=modality_configs,
             transforms=transforms,
             embodiment_tag=embodiment_tag,  # This overrides the dataset embodiment tag for finetuning.
             video_backend=config.video_backend,
         )
-        _sync_video_resolution_with_actual_data(train_dataset)
+        _sync_video_resolution_with_actual_data(base_dataset)
         if config.strict_preflight:
             _strict_preflight_dataset(
-                train_dataset,
+                base_dataset,
                 modality_configs,
                 transforms,
                 data_config_name=config.data_config,
                 embodiment_tag=embodiment_tag,
             )
+        if dyana_optimized_enabled:
+            trajectory_lengths = {
+                int(trajectory_id): int(trajectory_length)
+                for trajectory_id, trajectory_length in zip(
+                    base_dataset.trajectory_ids, base_dataset.trajectory_lengths
+                )
+            }
+            artifacts = build_dyana_sampling_artifacts(
+                dataset_path=config.dataset_path[0],
+                trajectory_lengths=trajectory_lengths,
+                train_episodes_per_task=dyana_settings["train_episodes_per_task"],
+                holdout_episodes_per_task=dyana_settings["holdout_episodes_per_task"],
+                base_index_stride=dyana_settings["base_index_stride"],
+                task_repeat_factors=dyana_settings["task_repeat_factors"],
+                subset_seed=config.dyana_subset_seed,
+                stage=dyana_settings["stage"],
+            )
+            train_dataset = FilteredStepDataset(
+                base_dataset=base_dataset,
+                manifest=artifacts.train_manifest,
+                transforms=data_config_cls.transform(),
+            )
+            train_dataset.train()
+            eval_dataset = FilteredStepDataset(
+                base_dataset=base_dataset,
+                manifest=artifacts.holdout_manifest,
+                transforms=data_config_cls.transform(),
+            )
+            eval_dataset.eval()
+
+            if int(os.environ.get("RANK", 0)) == 0:
+                persist_dyana_sampling_artifacts(
+                    output_dir=Path(config.output_dir) / "experiment_cfg",
+                    artifacts=artifacts,
+                    base_index_stride=dyana_settings["base_index_stride"],
+                    task_repeat_factors=dyana_settings["task_repeat_factors"],
+                )
+        else:
+            train_dataset = base_dataset
     else:
+        if dyana_optimized_enabled:
+            raise ValueError("dyana_optimized mode does not support mixture datasets.")
         single_datasets = []
         for p in config.dataset_path:
             assert os.path.exists(p), f"Dataset path {p} does not exist"
@@ -478,9 +698,15 @@ def main(config: ArgsConfig):
         )
         print(f"Loaded {len(single_datasets)} datasets, with {config.dataset_path} ")
 
-    global_batch_size = config.num_gpus * config.batch_size * config.gradient_accumulation_steps
+    effective_max_steps = dyana_settings["max_steps"] if dyana_settings is not None else config.max_steps
+    effective_gradient_accumulation_steps = (
+        dyana_settings["gradient_accumulation_steps"]
+        if dyana_settings is not None
+        else config.gradient_accumulation_steps
+    )
+    global_batch_size = config.num_gpus * config.batch_size * effective_gradient_accumulation_steps
     steps_per_epoch = math.ceil(len(train_dataset) / global_batch_size)
-    planned_epochs = config.max_steps / steps_per_epoch
+    planned_epochs = effective_max_steps / steps_per_epoch
     print(
         f"Training scale | dataset_steps={len(train_dataset)} global_batch={global_batch_size} "
         f"steps_per_epoch={steps_per_epoch} planned_epochs={planned_epochs:.4f}"
@@ -590,7 +816,35 @@ def main(config: ArgsConfig):
     model.compute_dtype = "bfloat16"
     model.config.compute_dtype = "bfloat16"
 
+    effective_learning_rate = (
+        dyana_settings["learning_rate"] if dyana_settings is not None else config.learning_rate
+    )
+    effective_warmup_ratio = (
+        dyana_settings["warmup_ratio"] if dyana_settings is not None else config.warmup_ratio
+    )
+    effective_save_steps = dyana_settings["save_steps"] if dyana_settings is not None else config.save_steps
+    effective_eval_steps = dyana_settings["eval_steps"] if dyana_settings is not None else None
+    effective_early_stop_patience = (
+        dyana_settings["early_stop_patience"] if dyana_settings is not None else None
+    )
+    effective_assert_lora_targets = bool(config.assert_lora_targets or dyana_optimized_enabled)
+    effective_assert_adapter_checkpoint = bool(
+        config.assert_adapter_checkpoint or dyana_optimized_enabled
+    )
+    fine_tune_mode = (
+        "lora_plus_modules_to_save"
+        if config.lora_rank > 0 and config.tune_projector
+        else ("lora_only" if config.lora_rank > 0 else "no_lora")
+    )
+
     if config.lora_rank > 0:
+        if config.tune_projector:
+            print(
+                "Fine-tune mode: LoRA + modules_to_save "
+                "(action_head.state_encoder/action_encoder/action_decoder), not adapter-only."
+            )
+        else:
+            print("Fine-tune mode: LoRA-only adapters.")
         model = get_lora_model(
             model,
             rank=config.lora_rank,
@@ -598,21 +852,26 @@ def main(config: ArgsConfig):
             lora_dropout=config.lora_dropout,
             action_head_only=not config.lora_full_model,
             tune_projector=config.tune_projector,
+            assert_lora_targets=effective_assert_lora_targets,
         )
     else:
         print("Warning: lora_rank=0, this run will not train LoRA adapters.")
 
     # 2.1 modify training args
-    training_args = TrainingArguments(
+    training_kwargs = dict(
         output_dir=config.output_dir,
-        run_name=None,
+        run_name=(
+            f"{Path(config.output_dir).name}-{dyana_settings['stage']}-{fine_tune_mode}"
+            if dyana_optimized_enabled and config.lora_rank > 0
+            else None
+        ),
         remove_unused_columns=False,
         deepspeed="",
         gradient_checkpointing=False,
         bf16=True,
         tf32=True,
         per_device_train_batch_size=config.batch_size,
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        gradient_accumulation_steps=effective_gradient_accumulation_steps,
         dataloader_num_workers=config.dataloader_num_workers,
         dataloader_pin_memory=False,
         dataloader_prefetch_factor=config.dataloader_prefetch_factor,
@@ -621,35 +880,55 @@ def main(config: ArgsConfig):
         adam_beta1=0.95,
         adam_beta2=0.999,
         adam_epsilon=1e-8,
-        learning_rate=config.learning_rate,
+        learning_rate=effective_learning_rate,
         weight_decay=config.weight_decay,
-        warmup_ratio=config.warmup_ratio,
+        warmup_ratio=effective_warmup_ratio,
         lr_scheduler_type="cosine",
         logging_steps=10.0,
         num_train_epochs=300,
-        max_steps=config.max_steps,
+        max_steps=effective_max_steps,
         save_strategy="steps",
-        save_steps=config.save_steps,
-        # evaluation_strategy="no",
+        save_steps=effective_save_steps,
         save_total_limit=5,
         report_to=config.report_to,
         seed=42,
-        do_eval=False,
+        do_eval=dyana_optimized_enabled,
         ddp_find_unused_parameters=False,
         ddp_bucket_cap_mb=100,
         torch_compile_mode=None,
     )
+    if dyana_optimized_enabled:
+        training_kwargs.update(
+            evaluation_strategy="steps",
+            eval_steps=effective_eval_steps,
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
+        )
+    training_args = TrainingArguments(**training_kwargs)
 
     # 2.2 run experiment
     experiment = TrainRunner(
         train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         model=model,
         training_args=training_args,
         resume_from_checkpoint=config.resume,
+        early_stopping_patience=effective_early_stop_patience,
+        assert_adapter_checkpoint=config.lora_rank > 0 and effective_assert_adapter_checkpoint,
     )
 
     # 2.3 run experiment
     experiment.train()
+    if dyana_optimized_enabled:
+        recommended_eval_cmd = (
+            "python eval_gr00t.py "
+            f"--model-path {config.output_dir} "
+            f"--dataset-path {config.dataset_path[0]} "
+            f"--data-config {config.data_config} "
+            f"--embodiment-tag {config.embodiment_tag}"
+        )
+        print(f"Recommended Unity dev-set eval command: {recommended_eval_cmd}")
 
 
 if __name__ == "__main__":
