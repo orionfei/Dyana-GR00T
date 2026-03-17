@@ -1,0 +1,138 @@
+{
+    "codebase_version": "v2.0",
+    "robot_type": "unityHand",
+    "total_episodes": 36944,
+    "total_frames": 2367741,
+    "total_tasks": 36944,
+    "total_videos": 36944,
+    "total_chunks": 0,
+    "chunks_size": 2000000,
+    "fps": 30.0,
+    "splits": {
+        "train": "0:0"
+    },
+    "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+    "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+    "features": {
+        "observation.images.ego_view": {
+            "dtype": "video",
+            "shape": [
+                800,
+                1920,
+                3
+            ],
+            "names": [
+                "height",
+                "width",
+                "channel"
+            ],
+            "video_info": {
+                "video.fps": 30.0,
+                "video.codec": "h264",
+                "video.pix_fmt": "yuv420p",
+                "video.is_depth_map": false,
+                "has_audio": false
+            }
+        },
+        "observation.state": {
+            "dtype": "float64",
+            "shape": [
+                18
+            ],
+            "names": [
+                "motor_0",
+                "motor_1",
+                "motor_2",
+                "motor_3",
+                "motor_4",
+                "motor_5",
+                "motor_6",
+                "motor_7",
+                "motor_8",
+                "motor_9",
+                "motor_10",
+                "motor_11",
+                "motor_12",
+                "motor_13",
+                "motor_14",
+                "motor_15",
+                "motor_16",
+                "motor_17"
+            ]
+        },
+        "action": {
+            "dtype": "float64",
+            "shape": [
+                18
+            ],
+            "names": [
+                "motor_0",
+                "motor_1",
+                "motor_2",
+                "motor_3",
+                "motor_4",
+                "motor_5",
+                "motor_6",
+                "motor_7",
+                "motor_8",
+                "motor_9",
+                "motor_10",
+                "motor_11",
+                "motor_12",
+                "motor_13",
+                "motor_14",
+                "motor_15",
+                "motor_16",
+                "motor_17"
+            ]
+        },
+        "timestamp": {
+            "dtype": "float64",
+            "shape": [
+                1
+            ]
+        },
+        "annotation.human.action.task_description": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ]
+        },
+        "task_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ]
+        },
+        "annotation.human.validity": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ]
+        },
+        "episode_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ]
+        },
+        "index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ]
+        },
+        "next.reward": {
+            "dtype": "float64",
+            "shape": [
+                1
+            ]
+        },
+        "next.done": {
+            "dtype": "bool",
+            "shape": [
+                1
+            ]
+        }
+    }
+}

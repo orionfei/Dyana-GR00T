@@ -1,0 +1,26 @@
+{
+    "state": {
+        "left_hand": {
+            "start": 0,
+            "end": 18
+        }
+    },
+    "action": {
+        "left_hand": {
+            "start": 0,
+            "end": 18
+        }
+    },
+    "video": {
+        "ego_view": {
+            "original_key": "observation.images.ego_view"
+        }
+    },
+    "annotation": {
+        "human.action.task_description": {},
+        "human.validity": {},
+        "human.coarse_action": {
+            "original_key": "annotation.human.action.task_description"
+        }
+    }
+}
