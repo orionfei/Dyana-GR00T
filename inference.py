@@ -1,26 +1,37 @@
 import os
+from pathlib import Path
+
 import torch
-import gr00t
 
 from gr00t.data.dataset import LeRobotSingleDataset
+from gr00t.data.transform.video import VideoCrop
 from gr00t.model.policy import Gr00tPolicy
 
 # change the following paths
-MODEL_PATH = "nvidia/GR00T-N1.5-3B"
-
-# REPO_PATH is the path of the pip install gr00t repo and one level up
-REPO_PATH = os.path.dirname(os.path.dirname(gr00t.__file__))
+REPO_PATH = os.path.dirname(os.path.abspath(__file__))
 DATASET_PATH = os.path.join(REPO_PATH, "dyana_data")
-# For pre-finetune baseline inference with the base model, use a built-in tag.
-# After finetuning, switch this to the tag used in training (e.g. "new_embodiment")
-# and point MODEL_PATH to your finetuned checkpoint directory.
-EMBODIMENT_TAG = "gr1"
+DEFAULT_MODEL_ROOT = Path(REPO_PATH) / "checkpoints" / "dyana_hand_task_lora"
+# This must match the embodiment tag used during finetuning.
+EMBODIMENT_TAG = "dyana_hand_task"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+
+def resolve_model_path() -> str:
+    env_model_path = os.environ.get("DYANA_GR00T_MODEL_PATH")
+    if env_model_path:
+        return env_model_path
+
+    checkpoint_dirs = sorted(DEFAULT_MODEL_ROOT.glob("checkpoint-*"))
+    if checkpoint_dirs:
+        return str(checkpoint_dirs[-1])
+    return str(DEFAULT_MODEL_ROOT)
+
+
+MODEL_PATH = resolve_model_path()
+
 # Load Pretrained Model
 from gr00t.experiment.data_config import DATA_CONFIG_MAP
-
 
 data_config = DATA_CONFIG_MAP["dyana_lora_11f_18d"]
 modality_config = data_config.modality_config()
@@ -74,72 +85,40 @@ for video_key in modality_config["video"].modality_keys:
         print(f"Updated metadata resolution for {video_key}: {(width, height)}")
 
 # Align normalization/statistics and modality dimensions with the current dataset.
+# `Gr00tPolicy` first loads checkpoint metadata. If that metadata has a different
+# camera resolution, VideoCrop may keep stale (height, width). Reset it so current
+# dataset metadata is always used.
+for transform in policy.modality_transform.transforms:
+    if isinstance(transform, VideoCrop):
+        transform.height = None
+        transform.width = None
+
 policy.modality_transform.set_metadata(dataset.metadata)
 policy.metadata = dataset.metadata
 
 # Visualize one example data
 
-print(step_data)
+# print(step_data)
 
 print("\n\n ====================================")
-for key, value in step_data.items():
-    if isinstance(value, np.ndarray):
-        print(key, value.shape)
-    else:
-        print(key, value)
-
-# import matplotlib.pyplot as plt
-
-# traj_id = 0
-# max_steps = 150
-
-# state_joints_across_time = []
-# gt_action_joints_across_time = []
-# images = []
-
-# sample_images = 6
-
-# for step_count in range(max_steps):
-#     data_point = dataset.get_step_data(traj_id, step_count)
-#     state_joints = data_point["state.right_arm"][0]
-#     gt_action_joints = data_point["action.right_arm"][0]
-    
-   
-#     state_joints_across_time.append(state_joints)
-#     gt_action_joints_across_time.append(gt_action_joints)
-
-#     # We can also get the image data
-#     if step_count % (max_steps // sample_images) == 0:
-#         image = data_point["video.ego_view"][0]
-#         images.append(image)
-
-# # Size is (max_steps, num_joints == 7)
-# state_joints_across_time = np.array(state_joints_across_time)
-# gt_action_joints_across_time = np.array(gt_action_joints_across_time)
-
-
-# # Plot the joint angles across time
-# fig, axes = plt.subplots(nrows=7, ncols=1, figsize=(8, 2*7))
-
-# for i, ax in enumerate(axes):
-#     ax.plot(state_joints_across_time[:, i], label="state joints")
-#     ax.plot(gt_action_joints_across_time[:, i], label="gt action joints")
-#     ax.set_title(f"Joint {i}")
-#     ax.legend()
-
-# plt.tight_layout()
-# plt.show()
-
-
-# # Plot the images in a row
-# fig, axes = plt.subplots(nrows=1, ncols=sample_images, figsize=(16, 4))
-
-# for i, ax in enumerate(axes):
-#     ax.imshow(images[i])
-#     ax.axis("off")
+# for key, value in step_data.items():
+#     if isinstance(value, np.ndarray):
+#         print(key, value.shape)
+#     else:
+#         print(key, value)
 
 # Run the policy
 predicted_action = policy.get_action(step_data)
+
+target_action_key = modality_config["action"].modality_keys[0]
+assert target_action_key in predicted_action, (
+    f"Expected action key {target_action_key}, got {list(predicted_action.keys())}"
+)
+target_action = predicted_action[target_action_key]
+assert target_action.shape[-1] == 18, (
+    f"Expected 18-dim action for {target_action_key}, got shape {target_action.shape}"
+)
+
 for key, value in predicted_action.items():
     print(key, value.shape)
     
