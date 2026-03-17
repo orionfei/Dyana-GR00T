@@ -33,7 +33,13 @@ MODEL_PATH = resolve_model_path()
 # Load Pretrained Model
 from gr00t.experiment.data_config import DATA_CONFIG_MAP
 
-data_config = DATA_CONFIG_MAP["dyana_lora_11f_18d"]
+DATA_CONFIG_NAME = os.environ.get("DYANA_GR00T_DATA_CONFIG", "dyana_lora_11f_18d")
+assert DATA_CONFIG_NAME in DATA_CONFIG_MAP, (
+    f"Unknown data config {DATA_CONFIG_NAME}. Available: {sorted(DATA_CONFIG_MAP.keys())}"
+)
+print(f"Using data config: {DATA_CONFIG_NAME}")
+
+data_config = DATA_CONFIG_MAP[DATA_CONFIG_NAME]
 modality_config = data_config.modality_config()
 modality_transform = data_config.transform()
 

@@ -32,11 +32,29 @@ from transformers import TrainingArguments
 
 from gr00t.data.dataset import LeRobotMixtureDataset, LeRobotSingleDataset
 from gr00t.data.schema import EmbodimentTag
+from gr00t.data.transform.concat import ConcatTransform
+from gr00t.data.transform.dyana import (
+    DyanaMotionTokenTransform,
+    DyanaMotionViewTransform,
+    DyanaTargetCropTransform,
+)
 from gr00t.experiment.data_config import load_data_config
 from gr00t.experiment.runner import TrainRunner
 from gr00t.model.gr00t_n1 import GR00T_N1_5
 from gr00t.model.transforms import EMBODIMENT_TAG_MAPPING, GR00TTransform
 from gr00t.utils.peft import get_lora_model
+
+
+DYANA_PHASE1_CONFIG_SPECS = {
+    "dyana_lora_11f_18d": {"video_views": 1, "motion_view": False, "target_crop": False, "token": False},
+    "dyana_motion_token_11f_18d": {"video_views": 1, "motion_view": False, "target_crop": False, "token": True},
+    "dyana_motion_view_11f_18d": {"video_views": 2, "motion_view": True, "target_crop": False, "token": False},
+    "dyana_motion_view_token_11f_18d": {"video_views": 2, "motion_view": True, "target_crop": False, "token": True},
+    "dyana_target_crop_11f_18d": {"video_views": 2, "motion_view": False, "target_crop": True, "token": False},
+    "dyana_target_crop_token_11f_18d": {"video_views": 2, "motion_view": False, "target_crop": True, "token": True},
+    "dyana_motion_crop_11f_18d": {"video_views": 3, "motion_view": True, "target_crop": True, "token": False},
+    "dyana_motion_crop_token_11f_18d": {"video_views": 3, "motion_view": True, "target_crop": True, "token": True},
+}
 
 
 def _sync_video_resolution_with_actual_data(dataset: LeRobotSingleDataset) -> None:
@@ -175,14 +193,49 @@ def _strict_preflight_dataset(
     ), f"max_action_dim={last_transform.max_action_dim} < required action dim {action_total_dim}"
 
     # Task-specific hard constraints for this project.
-    if data_config_name == "dyana_lora_11f_18d":
+    if data_config_name in DYANA_PHASE1_CONFIG_SPECS:
+        dyana_spec = DYANA_PHASE1_CONFIG_SPECS[data_config_name]
+        concat_transform = next(
+            (transform for transform in transforms.transforms if isinstance(transform, ConcatTransform)),
+            None,
+        )
+        assert concat_transform is not None, "ConcatTransform is required for Dyana configs"
+        assert (
+            modality_configs["video"].modality_keys == ["video.ego_view"]
+        ), f"Dyana configs must load only raw ego video, got {modality_configs['video'].modality_keys}"
         assert obs_horizon == 11, f"Expected 11-frame observation horizon, got {obs_horizon}"
         assert action_horizon == 10, f"Expected 10-step action horizon, got {action_horizon}"
         assert state_total_dim == 18, f"Expected 18D state, got {state_total_dim}"
         assert action_total_dim == 18, f"Expected 18D action, got {action_total_dim}"
         assert (
             last_transform.max_action_dim == 18
-        ), f"Expected max_action_dim=18 for dyana_lora_11f_18d, got {last_transform.max_action_dim}"
+        ), f"Expected max_action_dim=18 for {data_config_name}, got {last_transform.max_action_dim}"
+        assert len(concat_transform.video_concat_order) == dyana_spec["video_views"], (
+            f"Unexpected Dyana video stream count for {data_config_name}: "
+            f"{len(concat_transform.video_concat_order)} vs {dyana_spec['video_views']}"
+        )
+
+        has_motion_view = any(
+            isinstance(transform, DyanaMotionViewTransform) for transform in transforms.transforms
+        )
+        has_target_crop = any(
+            isinstance(transform, DyanaTargetCropTransform) for transform in transforms.transforms
+        )
+        has_token = any(
+            isinstance(transform, DyanaMotionTokenTransform) for transform in transforms.transforms
+        )
+        assert has_motion_view == dyana_spec["motion_view"], (
+            f"Dyana motion-view transform mismatch for {data_config_name}: "
+            f"expected {dyana_spec['motion_view']}, got {has_motion_view}"
+        )
+        assert has_target_crop == dyana_spec["target_crop"], (
+            f"Dyana target-crop transform mismatch for {data_config_name}: "
+            f"expected {dyana_spec['target_crop']}, got {has_target_crop}"
+        )
+        assert has_token == dyana_spec["token"], (
+            f"Dyana motion-token transform mismatch for {data_config_name}: "
+            f"expected {dyana_spec['token']}, got {has_token}"
+        )
 
     print(
         f"Preflight OK | traj={traj_id} obs_horizon={obs_horizon} action_horizon={action_horizon} "

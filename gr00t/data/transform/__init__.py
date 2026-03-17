@@ -19,6 +19,11 @@ from .base import (
     ModalityTransform,
 )
 from .concat import ConcatTransform
+from .dyana import (
+    DyanaMotionTokenTransform,
+    DyanaMotionViewTransform,
+    DyanaTargetCropTransform,
+)
 from .state_action import (
     StateActionDropout,
     StateActionPerturbation,

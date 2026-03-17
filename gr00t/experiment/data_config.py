@@ -20,6 +20,11 @@ from typing import Optional
 from gr00t.data.dataset import ModalityConfig
 from gr00t.data.transform.base import ComposedModalityTransform, ModalityTransform
 from gr00t.data.transform.concat import ConcatTransform
+from gr00t.data.transform.dyana import (
+    DyanaMotionTokenTransform,
+    DyanaMotionViewTransform,
+    DyanaTargetCropTransform,
+)
 from gr00t.data.transform.state_action import (
     StateActionSinCosTransform,
     StateActionToTensor,
@@ -273,14 +278,16 @@ class So100DualCamDataConfig(So100DataConfig):
 
 ###########################################################################################
 
-class DyanaLoRA11F18DDataConfig(So100DataConfig):
+class DyanaModular11F18DDataConfig(BaseDataConfig):
     """
-    Dyana custom config for LoRA fine-tuning:
-    - 11-frame observation window (t-10 ... t)
-    - 10-step action target
-    - 18-dim action/state from left_hand key
+    Dyana data config with modular derived views for ablations.
+
+    Raw dataset inputs remain unchanged (`video.ego_view` only). Derived views are
+    injected inside the transform chain so they can be enabled or disabled without
+    regenerating the dataset.
     """
 
+    source_video_keys = ["video.ego_view"]
     video_keys = ["video.ego_view"]
     state_keys = ["state.left_hand"]
     action_keys = ["action.left_hand"]
@@ -288,14 +295,163 @@ class DyanaLoRA11F18DDataConfig(So100DataConfig):
     observation_indices = list(range(-10, 1))
     action_indices = list(range(10))
 
+    motion_view_key = "video.motion_view"
+    target_crop_key = "video.target_crop"
+
+    use_motion_view = False
+    use_target_crop = False
+    use_motion_language_token = False
+
+    def modality_config(self) -> dict[str, ModalityConfig]:
+        return {
+            "video": ModalityConfig(
+                delta_indices=self.observation_indices,
+                modality_keys=self.source_video_keys,
+            ),
+            "state": ModalityConfig(
+                delta_indices=self.observation_indices,
+                modality_keys=self.state_keys,
+            ),
+            "action": ModalityConfig(
+                delta_indices=self.action_indices,
+                modality_keys=self.action_keys,
+            ),
+            "language": ModalityConfig(
+                delta_indices=self.observation_indices,
+                modality_keys=self.language_keys,
+            ),
+        }
+
+    def get_model_video_keys(self) -> list[str]:
+        video_keys = list(self.video_keys)
+        if self.use_motion_view:
+            video_keys.append(self.motion_view_key)
+        if self.use_target_crop:
+            video_keys.append(self.target_crop_key)
+        return video_keys
+
     def transform(self) -> ModalityTransform:
-        transforms = super().transform()
-        # Enforce native 18D action head for Dyana task (no 32D padding baseline during training).
-        assert len(transforms.transforms) > 0, "No transforms found in data config"
-        last_transform = transforms.transforms[-1]
-        assert isinstance(last_transform, GR00TTransform), "Last transform must be GR00TTransform"
-        last_transform.max_action_dim = 18
-        return transforms
+        source_video_keys = list(self.source_video_keys)
+        model_video_keys = self.get_model_video_keys()
+        transforms = [
+            # video transforms on the raw ego stream
+            VideoToTensor(apply_to=source_video_keys),
+            VideoCrop(apply_to=source_video_keys, scale=0.95),
+            VideoResize(
+                apply_to=source_video_keys,
+                height=224,
+                width=224,
+                interpolation="linear",
+            ),
+            VideoColorJitter(
+                apply_to=source_video_keys,
+                brightness=0.3,
+                contrast=0.4,
+                saturation=0.5,
+                hue=0.08,
+            ),
+            VideoToNumpy(apply_to=source_video_keys),
+        ]
+
+        if self.use_motion_view:
+            transforms.append(
+                DyanaMotionViewTransform(
+                    source_key=self.source_video_keys[0],
+                    target_key=self.motion_view_key,
+                )
+            )
+        if self.use_target_crop:
+            transforms.append(
+                DyanaTargetCropTransform(
+                    source_key=self.source_video_keys[0],
+                    target_key=self.target_crop_key,
+                    motion_key=self.motion_view_key if self.use_motion_view else None,
+                )
+            )
+        if self.use_motion_language_token:
+            transforms.append(DyanaMotionTokenTransform(apply_to=self.language_keys))
+
+        transforms.extend(
+            [
+                # state transforms
+                StateActionToTensor(apply_to=self.state_keys),
+                StateActionTransform(
+                    apply_to=self.state_keys,
+                    normalization_modes={key: "min_max" for key in self.state_keys},
+                ),
+                # action transforms
+                StateActionToTensor(apply_to=self.action_keys),
+                StateActionTransform(
+                    apply_to=self.action_keys,
+                    normalization_modes={key: "min_max" for key in self.action_keys},
+                ),
+                # concat transforms
+                ConcatTransform(
+                    video_concat_order=model_video_keys,
+                    state_concat_order=self.state_keys,
+                    action_concat_order=self.action_keys,
+                ),
+                # model-specific transform
+                GR00TTransform(
+                    state_horizon=len(self.observation_indices),
+                    action_horizon=len(self.action_indices),
+                    max_state_dim=64,
+                    max_action_dim=18,
+                ),
+            ]
+        )
+        return ComposedModalityTransform(transforms=transforms)
+
+
+class DyanaLoRA11F18DDataConfig(DyanaModular11F18DDataConfig):
+    """Baseline Dyana config: ego RGB + 18D state/action + raw task text."""
+
+
+class DyanaMotionToken11F18DDataConfig(DyanaModular11F18DDataConfig):
+    """Baseline plus compressed motion-token language."""
+
+    use_motion_language_token = True
+
+
+class DyanaMotionView11F18DDataConfig(DyanaModular11F18DDataConfig):
+    """Baseline plus motion-difference view."""
+
+    use_motion_view = True
+
+
+class DyanaMotionViewToken11F18DDataConfig(DyanaModular11F18DDataConfig):
+    """Baseline plus motion-difference view and compressed motion-token language."""
+
+    use_motion_view = True
+    use_motion_language_token = True
+
+
+class DyanaTargetCrop11F18DDataConfig(DyanaModular11F18DDataConfig):
+    """Baseline plus target-centric crop."""
+
+    use_target_crop = True
+
+
+class DyanaTargetCropToken11F18DDataConfig(DyanaModular11F18DDataConfig):
+    """Baseline plus target-centric crop and compressed motion-token language."""
+
+    use_target_crop = True
+    use_motion_language_token = True
+
+
+class DyanaMotionCrop11F18DDataConfig(DyanaModular11F18DDataConfig):
+    """Baseline plus motion view and target-centric crop."""
+
+    use_motion_view = True
+    use_target_crop = True
+
+
+class DyanaMotionCropToken11F18DDataConfig(DyanaModular11F18DDataConfig):
+    """All phase-1 modules enabled."""
+
+    use_motion_view = True
+    use_target_crop = True
+    use_motion_language_token = True
 
 ############################################################################################
 
@@ -813,6 +969,13 @@ DATA_CONFIG_MAP = {
     "so100": So100DataConfig(),
     "so100_dualcam": So100DualCamDataConfig(),
     "dyana_lora_11f_18d": DyanaLoRA11F18DDataConfig(),
+    "dyana_motion_token_11f_18d": DyanaMotionToken11F18DDataConfig(),
+    "dyana_motion_view_11f_18d": DyanaMotionView11F18DDataConfig(),
+    "dyana_motion_view_token_11f_18d": DyanaMotionViewToken11F18DDataConfig(),
+    "dyana_target_crop_11f_18d": DyanaTargetCrop11F18DDataConfig(),
+    "dyana_target_crop_token_11f_18d": DyanaTargetCropToken11F18DDataConfig(),
+    "dyana_motion_crop_11f_18d": DyanaMotionCrop11F18DDataConfig(),
+    "dyana_motion_crop_token_11f_18d": DyanaMotionCropToken11F18DDataConfig(),
     "unitree_g1": UnitreeG1DataConfig(),
     "unitree_g1_full_body": UnitreeG1FullBodyDataConfig(),
     "oxe_droid": OxeDroidDataConfig(),
